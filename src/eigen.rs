@@ -20,9 +20,9 @@ impl<const N: usize> Matrix<N, N> {
     //cобственное разложение: возвращает собственные значения и векторы матрицы
     //оно использует хассенберга и QR Фрэнсиса с двойным сдвигом
     pub fn eigen(&self) -> EigenDecomposition<N> {
-        let (mut h, z) = hessenberg_reduce_with_z(self);
+        let (mut h, mut z) = hessenberg_reduce_with_z(self); //diff
 
-        francis_qr(&mut h);
+        francis_qr(&mut h, &mut z); //diff
 
         let (eigenvalues_real, eigenvalues_imag) = tung_tung_tung_schur(&h);
 
@@ -52,7 +52,7 @@ impl<const N: usize> Matrix<N, N> {
 }
 
 
-// T - форма Шура, p - индекс 1×1 блока
+// T - форма Шура, p - индекс 1x1 блока
 // решаем (T - lamb*I)y = 0 обратным ходом вверх от строки p-1
 
 
@@ -115,7 +115,7 @@ fn schur_complex_eigenvec<const N: usize>(
 
 fn hessenberg_reduce_with_z<const N: usize>(a: &Matrix<N, N>) -> (Matrix<N, N>, Matrix<N, N>) {
     let mut h = a.clone();
-    let mut z = Matrix::<N, N>::identity();  
+    let mut z = Matrix::<N, N>::identity();
 
     for k in 0..N.saturating_sub(2) {
         let mut norm_sq = 0.0f64;
@@ -144,7 +144,7 @@ fn hessenberg_reduce_with_z<const N: usize>(a: &Matrix<N, N>) -> (Matrix<N, N>, 
             for j in (k + 1)..N {
                 dot += h.data[i][j] * v[j];
             }
-            if dot == 0.0 { continue; }   // если строго 0 не пишем - полезно для неплотных матриц
+            if dot == 0.0 { continue; }
             let f = two_over_vv * dot;
             for j in (k + 1)..N {
                 h.data[i][j] -= f * v[j];
@@ -165,9 +165,12 @@ fn hessenberg_reduce_with_z<const N: usize>(a: &Matrix<N, N>) -> (Matrix<N, N>, 
 //______________________________
 //QR фрэнсиса с двойным сдвигом 
 // Главный цикл: сжимаем активное окно пока не останется 0 или 1 строка.
-// максимум 100·N итераций
+// максимум 100*N итераций
 
-fn francis_qr<const N: usize>(h: &mut Matrix<N, N>) {
+fn francis_qr<const N: usize>(h: &mut Matrix<N, N>, z: &mut Matrix<N, N>) { //diff
+
+    let mut zt = z.transpose(); //diff
+
     let mut active_end = N;
     let mut iter       = 0;
     let max_iter       = 100 * N;
@@ -176,6 +179,23 @@ fn francis_qr<const N: usize>(h: &mut Matrix<N, N>) {
         let active_start = find_deflation_point(h, active_end);
 
         if active_end - active_start <= 2 {
+            if active_end - active_start == 2 { //diff
+                let p = active_start; //diff
+                let a = h.data[p][p]; //diff
+                let b = h.data[p][p + 1]; //diff
+                let c = h.data[p + 1][p]; //diff
+                let d = h.data[p + 1][p + 1]; //diff
+                // если поддиагональный не нулевой и disc >= 0 — вещественные лямбды,
+                // нужно привести блок к верхнетреугольному виду (иначе eigenvec solver сломается)
+                if c.abs() > f64::EPSILON * (a.abs() + d.abs()) { //diff
+                    let tr   = a + d; //diff
+                    let det  = a * d - b * c; //diff
+                    let disc = tr * tr - 4.0 * det; //diff
+                    if disc >= 0.0 { //diff
+                        standardize_2x2_real(h, &mut zt, p); //diff
+                    } //diff
+                } //diff
+            } //diff
             active_end = active_start;
             continue;
         }
@@ -191,13 +211,62 @@ fn francis_qr<const N: usize>(h: &mut Matrix<N, N>) {
             wilkinson_shift(h, active_end)
         };
 
-        francis_double_step(h, active_start, active_end, sigma_sum, sigma_prod);
+        francis_double_step(h, &mut zt, active_start, active_end, sigma_sum, sigma_prod); //diff
         iter += 1;
     }
+
+    *z = zt.transpose(); //diff - транспонируем обратно в Z
 
     debug_assert!(active_end <= 1,
         "francis_qr: не сошлось за {} итераций", max_iter);
 }
+
+// приводим 2x2 блок с вещественными лямбдами к верхнетреугольному виду через Givens
+// строим Q = [[cs, -sn],[sn, cs]], применяем Q^T*H*Q и накапливаем ZT <- Q^T*ZT
+
+fn standardize_2x2_real<const N: usize>(h: &mut Matrix<N, N>, zt: &mut Matrix<N, N>, p: usize) { //diff
+    let a    = h.data[p][p]; //diff
+    let b    = h.data[p][p + 1]; //diff
+    let c    = h.data[p + 1][p]; //diff
+    let d    = h.data[p + 1][p + 1]; //diff
+    let tr   = a + d; //diff
+    let det  = a * d - b * c; //diff
+    let disc = tr * tr - 4.0 * det; //diff
+    let sq   = disc.max(0.0).sqrt(); //diff
+    let lam1 = (tr + sq) * 0.5; //diff
+    let (vx, vy) = if b.hypot(lam1 - a) >= (lam1 - d).hypot(c) { //diff
+        (b, lam1 - a) //diff
+    } else { //diff
+        (lam1 - d, c) //diff
+    }; //diff
+    let norm = vx.hypot(vy); //diff
+    if norm < f64::EPSILON { return; } //diff
+    let cs = vx / norm; //diff
+    let sn = vy / norm; //diff
+    // левое умножение Q^T: строчки p и p+1, все столбцы j
+    for j in 0..N { //diff
+        let t0 =  cs * h.data[p][j] + sn * h.data[p + 1][j]; //diff
+        let t1 = -sn * h.data[p][j] + cs * h.data[p + 1][j]; //diff
+        h.data[p][j]     = t0; //diff
+        h.data[p + 1][j] = t1; //diff
+    } //diff
+    // правое умножение Q: столбцы p и p+1, все строки i
+    for i in 0..N { //diff
+        let t0 =  cs * h.data[i][p] + sn * h.data[i][p + 1]; //diff
+        let t1 = -sn * h.data[i][p] + cs * h.data[i][p + 1]; //diff
+        h.data[i][p]     = t0; //diff
+        h.data[i][p + 1] = t1; //diff
+    } //diff
+    h.data[p + 1][p] = 0.0; //diff
+    // Z_new = Z_old*Q  =>  ZT_new = Q^T * ZT_old
+    // обновляем строки p и p+1 матрицы ZT
+    for j in 0..N { //diff
+        let t0 =  cs * zt.data[p][j] + sn * zt.data[p + 1][j]; //diff
+        let t1 = -sn * zt.data[p][j] + cs * zt.data[p + 1][j]; //diff
+        zt.data[p][j]     = t0; //diff
+        zt.data[p + 1][j] = t1; //diff
+    } //diff
+} //diff
 
 // тут мы ищем самую нижнюю строку где поддиагональный элемент пренебрежимо мал.
 // если нашли то обнуляем его на месте и возвращаем индекс
@@ -217,7 +286,7 @@ fn find_deflation_point<const N: usize>(h: &mut Matrix<N, N>, active_end: usize)
 
 
 // Сдвиг уилкинсона 
-// берём нижний 2×2 блок активного окна, возвращаем (tr, det)
+// берём нижний 2x2 блок активного окна, возвращаем (tr, det)
 // они становятся коэффициентами в двойном шаге френсиса
 
 fn wilkinson_shift<const N: usize>(h: &Matrix<N, N>, end: usize) -> (f64, f64) {
@@ -229,6 +298,7 @@ fn wilkinson_shift<const N: usize>(h: &Matrix<N, N>, end: usize) -> (f64, f64) {
 
 fn francis_double_step<const N: usize>(
     h: &mut Matrix<N, N>,
+    zt: &mut Matrix<N, N>, //diff 
     start: usize, end: usize,
     shift_sum: f64, shift_prod: f64,
 ) {
@@ -276,6 +346,14 @@ fn francis_double_step<const N: usize>(
             h.data[i][r + 2] -= f * v[2];
         }
 
+        for j in 0..N { //diff
+            let dot = v[0] * zt.data[r][j] + v[1] * zt.data[r + 1][j] + v[2] * zt.data[r + 2][j]; //diff
+            let f = two_over_vv * dot; //diff
+            zt.data[r][j]     -= f * v[0]; //diff
+            zt.data[r + 1][j] -= f * v[1]; //diff
+            zt.data[r + 2][j] -= f * v[2]; //diff
+        } //diff
+
         if k + 1 < e - s - 2 {
             x = [h.data[r + 1][r], h.data[r + 2][r], h.data[r + 3][r]];
         }
@@ -303,6 +381,13 @@ fn francis_double_step<const N: usize>(
             h.data[i][rt] -= f * v0;
             h.data[i][rb] -= f * v1;
         }
+        // trailing 2x2, последовательный доступ по j
+        for j in 0..N { //diff
+            let dot = v0 * zt.data[rt][j] + v1 * zt.data[rb][j]; //diff
+            let f   = two_over_vv * dot; //diff
+            zt.data[rt][j] -= f * v0; //diff
+            zt.data[rb][j] -= f * v1; //diff
+        } //diff
     }
 }
 
@@ -328,21 +413,21 @@ fn tung_tung_tung_schur<const N: usize>(t: &Matrix<N, N>) -> ([f64; N], [f64; N]
 
             if disc >= 0.0 {
                 let sq  = disc.sqrt();
-                let big = if tr >= 0.0 { (tr + sq) * 0.5 } else { (tr - sq) * 0.5 };  // * 0.5
+                let big = if tr >= 0.0 { (tr + sq) * 0.5 } else { (tr - sq) * 0.5 };
                 let sml = if big.abs() > f64::EPSILON { det / big } else { tr - big };
                 re[i] = big;   im[i]   = 0.0;
                 re[i+1] = sml; im[i+1] = 0.0;
             } else {
-                let half_tr = tr * 0.5;         // вынес в отдельные переменные чтобы не считать два раза          
-                let half_im = (-disc).sqrt() * 0.5;  
-                re[i]   = half_tr;  
+                let half_tr = tr * 0.5;
+                let half_im = (-disc).sqrt() * 0.5;
+                re[i]   = half_tr;
                 im[i]   =  half_im;
-                re[i+1] = half_tr;  
+                re[i+1] = half_tr;
                 im[i+1] = -half_im;
             }
             i += 2;
         } else {
-            re[i] = t.data[i][i];  
+            re[i] = t.data[i][i];
             im[i] = 0.0;
             i += 1;
         }
